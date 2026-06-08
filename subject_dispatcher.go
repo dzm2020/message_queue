@@ -12,6 +12,7 @@ import (
 type subjectDispatcher struct {
 	subject    string
 	subscriber ISubscriber
+	stats      *connectionEventStats
 
 	msgCh      chan *nats.Msg
 	stop       chan struct{}
@@ -20,14 +21,7 @@ type subjectDispatcher struct {
 	panicCount atomic.Uint64
 }
 
-var dispatcherPanicTotal atomic.Uint64
-
-// DispatcherPanicTotal 返回 dispatcher goroutine 已恢复的 panic 总数。
-func DispatcherPanicTotal() uint64 {
-	return dispatcherPanicTotal.Load()
-}
-
-func newSubjectDispatcher(subject string, subscriber ISubscriber, queueSize int) *subjectDispatcher {
+func newSubjectDispatcher(subject string, subscriber ISubscriber, queueSize int, stats *connectionEventStats) *subjectDispatcher {
 	if queueSize <= 0 {
 		queueSize = defaultSubjectQueueSize
 	}
@@ -35,6 +29,7 @@ func newSubjectDispatcher(subject string, subscriber ISubscriber, queueSize int)
 	d := &subjectDispatcher{
 		subject:    subject,
 		subscriber: subscriber,
+		stats:      stats,
 		msgCh:      make(chan *nats.Msg, queueSize),
 		stop:       make(chan struct{}),
 	}
@@ -62,7 +57,10 @@ func (d *subjectDispatcher) handleSafely(msg *nats.Msg) {
 	defer func() {
 		if r := recover(); r != nil {
 			subjectPanicCount := d.panicCount.Add(1)
-			total := dispatcherPanicTotal.Add(1)
+			var total uint64
+			if d.stats != nil {
+				total = d.stats.onDispatcherPanic()
+			}
 			log.Printf("queue dispatcher recovered panic subject=%s subject_panic_count=%d total_panic_count=%d panic=%v\n%s",
 				d.subject, subjectPanicCount, total, r, debug.Stack())
 		}

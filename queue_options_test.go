@@ -39,7 +39,7 @@ func TestNewNATSMessageQueueFromConnWithOptionsAppliesConfig(t *testing.T) {
 }
 
 func TestAckWorkerPoolCloseRejectsEnqueue(t *testing.T) {
-	pool := newAckWorkerPool(nil, 1, 1, time.Second)
+	pool := newAckWorkerPool(nil, 1, 1, time.Second, nil)
 	pool.Close()
 
 	err := pool.Enqueue("subject.a", []byte("payload"))
@@ -49,7 +49,7 @@ func TestAckWorkerPoolCloseRejectsEnqueue(t *testing.T) {
 }
 
 func TestAckWorkerPoolWorkerIndexStablePerSubject(t *testing.T) {
-	pool := newAckWorkerPool(nil, 4, 8, time.Second)
+	pool := newAckWorkerPool(nil, 4, 8, time.Second, nil)
 	defer pool.Close()
 
 	a1 := pool.workerIndex("subject.a")
@@ -60,10 +60,30 @@ func TestAckWorkerPoolWorkerIndexStablePerSubject(t *testing.T) {
 }
 
 func TestSubjectDispatcherUsesConfiguredQueueSize(t *testing.T) {
-	dispatcher := newSubjectDispatcher("subject.test", &noopSubscriber{}, 25)
+	dispatcher := newSubjectDispatcher("subject.test", &noopSubscriber{}, 25, nil)
 	defer dispatcher.stopAndWait()
 
 	if cap(dispatcher.msgCh) != 25 {
 		t.Fatalf("dispatcher queue size mismatch: got=%d want=25", cap(dispatcher.msgCh))
+	}
+}
+
+func TestConnectionEventStatsSnapshot(t *testing.T) {
+	var stats connectionEventStats
+	stats.onDisconnect(errors.New("network down"))
+	stats.onReconnect()
+
+	snapshot := stats.snapshot()
+	if snapshot.Disconnects != 1 {
+		t.Fatalf("disconnect count mismatch: got=%d want=1", snapshot.Disconnects)
+	}
+	if snapshot.Reconnects != 1 {
+		t.Fatalf("reconnect count mismatch: got=%d want=1", snapshot.Reconnects)
+	}
+	if snapshot.LastDisconnectErr == "" {
+		t.Fatal("last disconnect err should not be empty")
+	}
+	if snapshot.LastDisconnectAt.IsZero() || snapshot.LastReconnectAt.IsZero() {
+		t.Fatal("disconnect/reconnect time should be recorded")
 	}
 }

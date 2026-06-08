@@ -143,9 +143,7 @@ go test ./... -bench BenchmarkRequestParallel -benchmem -run ^$
 
 ## 可观测指标函数
 
-- `PublishAsyncAckFailureTotal() uint64`
-- `PublishAsyncAckDroppedTotal() uint64`
-- `DispatcherPanicTotal() uint64`
+- `GetConnectionEventStats(mq IMessageQue) (ConnectionEventStats, bool)`
 
 ---
 

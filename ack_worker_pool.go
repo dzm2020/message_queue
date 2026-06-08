@@ -4,7 +4,6 @@ import (
 	"hash/fnv"
 	"log"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -18,6 +17,7 @@ type ackTask struct {
 type ackWorkerPool struct {
 	conn    *nats.Conn
 	timeout time.Duration
+	stats   *connectionEventStats
 
 	workerChs []chan ackTask
 	mu        sync.RWMutex
@@ -26,20 +26,7 @@ type ackWorkerPool struct {
 	wg        sync.WaitGroup
 }
 
-var publishAsyncAckFailureTotal atomic.Uint64
-var publishAsyncAckDroppedTotal atomic.Uint64
-
-// PublishAsyncAckFailureTotal 返回 Publish 异步 ACK 失败总数。
-func PublishAsyncAckFailureTotal() uint64 {
-	return publishAsyncAckFailureTotal.Load()
-}
-
-// PublishAsyncAckDroppedTotal 返回 Publish 异步 ACK 入队失败总数。
-func PublishAsyncAckDroppedTotal() uint64 {
-	return publishAsyncAckDroppedTotal.Load()
-}
-
-func newAckWorkerPool(conn *nats.Conn, workerCount int, queueSize int, timeout time.Duration) *ackWorkerPool {
+func newAckWorkerPool(conn *nats.Conn, workerCount int, queueSize int, timeout time.Duration, stats *connectionEventStats) *ackWorkerPool {
 	if workerCount <= 0 {
 		workerCount = 1
 	}
@@ -50,6 +37,7 @@ func newAckWorkerPool(conn *nats.Conn, workerCount int, queueSize int, timeout t
 	pool := &ackWorkerPool{
 		conn:      conn,
 		timeout:   timeout,
+		stats:     stats,
 		workerChs: make([]chan ackTask, workerCount),
 	}
 
@@ -71,7 +59,9 @@ func (p *ackWorkerPool) Enqueue(subject string, data []byte) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.closed {
-		publishAsyncAckDroppedTotal.Add(1)
+		if p.stats != nil {
+			p.stats.onPublishAckDropped()
+		}
 		return ErrNilConnection
 	}
 	workerCh := p.workerChs[p.workerIndex(subject)]
@@ -80,7 +70,9 @@ func (p *ackWorkerPool) Enqueue(subject string, data []byte) error {
 	case workerCh <- task:
 		return nil
 	default:
-		publishAsyncAckDroppedTotal.Add(1)
+		if p.stats != nil {
+			p.stats.onPublishAckDropped()
+		}
 		return ErrPublishAckQueueFull
 	}
 }
@@ -94,7 +86,10 @@ func (p *ackWorkerPool) runWorker(workerID int, ch <-chan ackTask) {
 		msg.Header.Set(publishRequestHeader, "1")
 
 		if _, err := p.conn.RequestMsg(msg, p.timeout); err != nil {
-			total := publishAsyncAckFailureTotal.Add(1)
+			var total uint64
+			if p.stats != nil {
+				total = p.stats.onPublishAckFailure()
+			}
 			log.Printf("queue publish async ack failed worker=%d subject=%s total_failures=%d err=%v", workerID, task.subject, total, err)
 		}
 	}

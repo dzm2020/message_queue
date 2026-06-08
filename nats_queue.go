@@ -36,18 +36,17 @@ func NewNATSMessageQueueFromConnWithOptions(conn *nats.Conn, queueOptions ...Que
 }
 
 func newNATSMessageQueueFromConn(conn *nats.Conn, cfg queueConfig) *natsMessageQueue {
-	var ack *ackWorkerPool
-	if conn != nil {
-		ack = newAckWorkerPool(conn, cfg.ackWorkerCount, cfg.ackQueueSize, cfg.publishAckTimeout)
-	}
-
-	return &natsMessageQueue{
+	mq := &natsMessageQueue{
 		conn:          conn,
-		ack:           ack,
 		cfg:           cfg,
 		dispatchers:   make(map[string]*subjectDispatcher),
 		subscriptions: make(map[string]*nats.Subscription),
 	}
+	if conn != nil {
+		mq.ack = newAckWorkerPool(conn, cfg.ackWorkerCount, cfg.ackQueueSize, cfg.publishAckTimeout, &mq.connStats)
+	}
+	mq.installConnectionHandlers()
+	return mq
 }
 
 type natsMessageQueue struct {
@@ -55,6 +54,7 @@ type natsMessageQueue struct {
 	ack  *ackWorkerPool
 
 	cfg           queueConfig
+	connStats     connectionEventStats
 	mu            sync.RWMutex
 	dispatchers   map[string]*subjectDispatcher
 	subscriptions map[string]*nats.Subscription
@@ -110,7 +110,7 @@ func (mq *natsMessageQueue) Subscribe(subject string, subscriber ISubscriber) (I
 		return nil, ErrSubjectAlreadySubscribed
 	}
 
-	dispatcher := newSubjectDispatcher(subject, subscriber, mq.cfg.subjectQueueSize)
+	dispatcher := newSubjectDispatcher(subject, subscriber, mq.cfg.subjectQueueSize, &mq.connStats)
 
 	mq.dispatchers[subject] = dispatcher
 	mq.mu.Unlock()
@@ -196,4 +196,23 @@ func (mq *natsMessageQueue) Close() {
 	if conn != nil {
 		conn.Close()
 	}
+}
+
+// ConnectionEventStats 返回断连/重连统计快照。
+func (mq *natsMessageQueue) ConnectionEventStats() ConnectionEventStats {
+	return mq.connStats.snapshot()
+}
+
+func (mq *natsMessageQueue) installConnectionHandlers() {
+	if mq.conn == nil {
+		return
+	}
+
+	mq.conn.SetDisconnectErrHandler(func(conn *nats.Conn, err error) {
+		mq.connStats.onDisconnect(err)
+	})
+
+	mq.conn.SetReconnectHandler(func(conn *nats.Conn) {
+		mq.connStats.onReconnect()
+	})
 }
