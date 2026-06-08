@@ -1,7 +1,6 @@
 package queue
 
 import (
-	"log"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -13,6 +12,7 @@ type subjectDispatcher struct {
 	subject    string
 	subscriber ISubscriber
 	stats      *connectionEventStats
+	logger     Logger
 
 	msgCh      chan *nats.Msg
 	stop       chan struct{}
@@ -21,7 +21,7 @@ type subjectDispatcher struct {
 	panicCount atomic.Uint64
 }
 
-func newSubjectDispatcher(subject string, subscriber ISubscriber, queueSize int, stats *connectionEventStats) *subjectDispatcher {
+func newSubjectDispatcher(subject string, subscriber ISubscriber, queueSize int, stats *connectionEventStats, logger Logger) *subjectDispatcher {
 	if queueSize <= 0 {
 		queueSize = defaultSubjectQueueSize
 	}
@@ -30,6 +30,7 @@ func newSubjectDispatcher(subject string, subscriber ISubscriber, queueSize int,
 		subject:    subject,
 		subscriber: subscriber,
 		stats:      stats,
+		logger:     logger,
 		msgCh:      make(chan *nats.Msg, queueSize),
 		stop:       make(chan struct{}),
 	}
@@ -61,8 +62,10 @@ func (d *subjectDispatcher) handleSafely(msg *nats.Msg) {
 			if d.stats != nil {
 				total = d.stats.onDispatcherPanic()
 			}
-			log.Printf("queue dispatcher recovered panic subject=%s subject_panic_count=%d total_panic_count=%d panic=%v\n%s",
-				d.subject, subjectPanicCount, total, r, debug.Stack())
+			if d.logger != nil {
+				d.logger.Errorf("queue dispatcher recovered panic subject=%s subject_panic_count=%d total_panic_count=%d panic=%v\n%s",
+					d.subject, subjectPanicCount, total, r, debug.Stack())
+			}
 		}
 	}()
 

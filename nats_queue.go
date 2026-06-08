@@ -41,7 +41,7 @@ func newNATSMessageQueueFromConn(conn *nats.Conn, cfg queueConfig) *natsMessageQ
 		subscriptions: make(map[string]*nats.Subscription),
 	}
 	if conn != nil {
-		mq.ack = newAckWorkerPool(conn, cfg.ackWorkerCount, cfg.ackQueueSize, cfg.publishAckTimeout, &mq.connStats)
+		mq.ack = newAckWorkerPool(conn, cfg.ackWorkerCount, cfg.ackQueueSize, cfg.publishAckTimeout, &mq.connStats, cfg.logger)
 	}
 	mq.installConnectionHandlers()
 	return mq
@@ -67,12 +67,16 @@ type natsSubscription struct {
 func (mq *natsMessageQueue) Publish(subject string, data []byte) error {
 	mq.mu.RLock()
 	ack := mq.ack
+	logger := mq.cfg.logger
 	mq.mu.RUnlock()
 
 	if ack == nil {
 		return ErrNilConnection
 	}
 	if err := ack.Enqueue(subject, data); err != nil {
+		if logger != nil {
+			logger.Errorf("queue publish enqueue ack failed subject=%s err=%v", subject, err)
+		}
 		return err
 	}
 	return nil
@@ -81,12 +85,16 @@ func (mq *natsMessageQueue) Publish(subject string, data []byte) error {
 func (mq *natsMessageQueue) Request(subject string, data []byte, timeout time.Duration) ([]byte, error) {
 	mq.mu.RLock()
 	conn := mq.conn
+	logger := mq.cfg.logger
 	mq.mu.RUnlock()
 	if conn == nil {
 		return nil, ErrNilConnection
 	}
 	msg, err := conn.Request(subject, data, timeout)
 	if err != nil {
+		if logger != nil && errors.Is(err, nats.ErrTimeout) {
+			logger.Warnf("queue request timeout subject=%s timeout=%s err=%v", subject, timeout, err)
+		}
 		return nil, err
 	}
 	return msg.Data, nil
@@ -108,7 +116,7 @@ func (mq *natsMessageQueue) Subscribe(subject string, subscriber ISubscriber) (I
 		return nil, ErrSubjectAlreadySubscribed
 	}
 
-	dispatcher := newSubjectDispatcher(subject, subscriber, mq.cfg.subjectQueueSize, &mq.connStats)
+	dispatcher := newSubjectDispatcher(subject, subscriber, mq.cfg.subjectQueueSize, &mq.connStats, mq.cfg.logger)
 
 	mq.dispatchers[subject] = dispatcher
 	mq.mu.Unlock()
@@ -208,9 +216,19 @@ func (mq *natsMessageQueue) installConnectionHandlers() {
 
 	mq.conn.SetDisconnectErrHandler(func(conn *nats.Conn, err error) {
 		mq.connStats.onDisconnect(err)
+		if mq.cfg.logger != nil {
+			if err != nil {
+				mq.cfg.logger.Warnf("queue nats disconnected err=%v", err)
+			} else {
+				mq.cfg.logger.Warnf("queue nats disconnected")
+			}
+		}
 	})
 
 	mq.conn.SetReconnectHandler(func(conn *nats.Conn) {
 		mq.connStats.onReconnect()
+		if mq.cfg.logger != nil {
+			mq.cfg.logger.Infof("queue nats reconnected server=%s", conn.ConnectedUrl())
+		}
 	})
 }

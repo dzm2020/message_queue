@@ -39,7 +39,7 @@ func TestNewNATSMessageQueueFromConnWithOptionsAppliesConfig(t *testing.T) {
 }
 
 func TestAckWorkerPoolCloseRejectsEnqueue(t *testing.T) {
-	pool := newAckWorkerPool(nil, 1, 1, time.Second, nil)
+	pool := newAckWorkerPool(nil, 1, 1, time.Second, nil, nil)
 	pool.Close()
 
 	err := pool.Enqueue("subject.a", []byte("payload"))
@@ -49,7 +49,7 @@ func TestAckWorkerPoolCloseRejectsEnqueue(t *testing.T) {
 }
 
 func TestAckWorkerPoolWorkerIndexStablePerSubject(t *testing.T) {
-	pool := newAckWorkerPool(nil, 4, 8, time.Second, nil)
+	pool := newAckWorkerPool(nil, 4, 8, time.Second, nil, nil)
 	defer pool.Close()
 
 	a1 := pool.workerIndex("subject.a")
@@ -60,11 +60,20 @@ func TestAckWorkerPoolWorkerIndexStablePerSubject(t *testing.T) {
 }
 
 func TestSubjectDispatcherUsesConfiguredQueueSize(t *testing.T) {
-	dispatcher := newSubjectDispatcher("subject.test", &noopSubscriber{}, 25, nil)
+	dispatcher := newSubjectDispatcher("subject.test", &noopSubscriber{}, 25, nil, nil)
 	defer dispatcher.stopAndWait()
 
 	if cap(dispatcher.msgCh) != 25 {
 		t.Fatalf("dispatcher queue size mismatch: got=%d want=25", cap(dispatcher.msgCh))
+	}
+}
+
+func TestWithLoggerSetsConfigLogger(t *testing.T) {
+	cfg := applyQueueOptions([]QueueOption{
+		WithLogger(defaultLogger()),
+	})
+	if cfg.logger == nil {
+		t.Fatal("logger should not be nil")
 	}
 }
 

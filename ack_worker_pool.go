@@ -2,7 +2,6 @@ package queue
 
 import (
 	"hash/fnv"
-	"log"
 	"sync"
 	"time"
 
@@ -20,6 +19,7 @@ type ackWorkerPool struct {
 	conn    *nats.Conn
 	timeout time.Duration
 	stats   *connectionEventStats
+	logger  Logger
 
 	workerChs []chan ackTask
 	mu        sync.RWMutex
@@ -28,7 +28,7 @@ type ackWorkerPool struct {
 	wg        sync.WaitGroup
 }
 
-func newAckWorkerPool(conn *nats.Conn, workerCount int, queueSize int, timeout time.Duration, stats *connectionEventStats) *ackWorkerPool {
+func newAckWorkerPool(conn *nats.Conn, workerCount int, queueSize int, timeout time.Duration, stats *connectionEventStats, logger Logger) *ackWorkerPool {
 	if workerCount <= 0 {
 		workerCount = 1
 	}
@@ -40,6 +40,7 @@ func newAckWorkerPool(conn *nats.Conn, workerCount int, queueSize int, timeout t
 		conn:      conn,
 		timeout:   timeout,
 		stats:     stats,
+		logger:    logger,
 		workerChs: make([]chan ackTask, workerCount),
 	}
 
@@ -92,7 +93,9 @@ func (p *ackWorkerPool) runWorker(workerID int, ch <-chan ackTask) {
 			if p.stats != nil {
 				total = p.stats.onPublishAckFailure()
 			}
-			log.Printf("queue publish async ack failed worker=%d subject=%s total_failures=%d err=%v", workerID, task.subject, total, err)
+			if p.logger != nil {
+				p.logger.Errorf("queue publish async ack failed worker=%d subject=%s total_failures=%d err=%v", workerID, task.subject, total, err)
+			}
 		}
 	}
 }

@@ -19,6 +19,7 @@ type queueConfig struct {
 	ackWorkerCount    int
 	ackQueueSize      int
 	natsOptions       []nats.Option
+	logger            Logger
 }
 
 func defaultQueueConfig() queueConfig {
@@ -27,6 +28,7 @@ func defaultQueueConfig() queueConfig {
 		publishAckTimeout: defaultPublishAckTimeout,
 		ackWorkerCount:    defaultAckWorkerCount,
 		ackQueueSize:      defaultAckQueueSize,
+		logger:            defaultLogger(),
 	}
 }
 
@@ -68,6 +70,15 @@ func WithNatsOptions(natsOptions ...nats.Option) QueueOption {
 	return func(cfg *queueConfig) {
 		if len(natsOptions) > 0 {
 			cfg.natsOptions = natsOptions
+		}
+	}
+}
+
+// WithLogger 配置外部注入日志器。
+func WithLogger(logger Logger) QueueOption {
+	return func(cfg *queueConfig) {
+		if logger != nil {
+			cfg.logger = logger
 		}
 	}
 }
