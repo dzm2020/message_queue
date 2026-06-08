@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	defaultSubjectQueueSize  = 10240
+	defaultSubjectQueueSize  = 1024
 	defaultPublishAckTimeout = 2 * time.Second
 	defaultAckWorkerCount    = 8
 	defaultAckQueueSize      = 4096
