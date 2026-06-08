@@ -9,6 +9,8 @@ import (
 	"github.com/nats-io/nats.go"
 )
 
+const publishRequestHeader = "X-MQ-Publish"
+
 type ackTask struct {
 	subject string
 	data    []byte

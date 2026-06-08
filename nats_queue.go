@@ -13,8 +13,6 @@ var ErrNilConnection = errors.New("nats connection is nil")
 var ErrSubjectAlreadySubscribed = errors.New("subject already subscribed")
 var ErrPublishAckQueueFull = errors.New("publish ack queue is full")
 
-const publishRequestHeader = "X-MQ-Publish"
-
 // NewNATSMessageQueue 创建并连接 NATS 消息队列实例。
 func NewNATSMessageQueue(url string, queueOptions ...QueueOption) (IMessageQue, error) {
 	cfg := applyQueueOptions(queueOptions)
