@@ -1,23 +1,14 @@
 # message_queue
 
-基于 `github.com/nats-io/nats.go` 封装的轻量消息队列组件，支持：
+`message_queue` 是基于 `github.com/nats-io/nats.go` 的轻量封装，提供统一的消息队列接口：
 
-- 异步发布（`Publish`，后台 ACK 校验）
-- 同步请求应答（`Request`，RPC 模式）
-- 主题订阅（`Subscribe`，每个 `subject` 独立协程处理）
+- `Publish`：异步发布（框架自动 ACK）
+- `Request`：同步请求-应答（RPC）
+- `Subscribe`：主题订阅回调
+- `Close`：关闭连接
 
-> 模块路径是 `message_queue`，包名是 `queue`。  
-> 建议导入时起别名，例如 `mq "message_queue"`。
-
----
-
-## 特性
-
-- **发布不阻塞**：`Publish` 立即返回，后台由有界 ACK worker 池做确认。
-- **同主题有序**：ACK worker 按 `subject` 哈希固定到同一 worker，保证同主题顺序稳定。
-- **订阅隔离**：每个 `subject` 有独立 `dispatcher` 协程，避免跨主题互相阻塞。
-- **安全关闭**：`Close()` 会先取消订阅，再停止 dispatcher、ACK 池并关闭连接。
-- **基础可观测性**：提供 panic/ACK 失败与丢弃计数函数。
+> 模块路径：`message_queue`  
+> 包名：`queue`（建议导入别名 `mq`）
 
 ---
 
@@ -29,27 +20,57 @@ go get github.com/nats-io/nats.go
 
 ---
 
-## 核心接口
+## 接口定义
 
 ```go
 type IMessageQue interface {
-    Publish(subject string, data []byte) error
-    Request(subject string, data []byte, timeout time.Duration) ([]byte, error)
-    Subscribe(subject string, subscriber ISubscriber) (ISubscription, error)
-    Close()
+	Publish(subject string, data []byte) error
+	Request(subject string, data []byte, timeout time.Duration) ([]byte, error)
+	Subscribe(subject string, subscriber ISubscriber) (ISubscription, error)
+	Close()
 }
 ```
-
-`ISubscriber`：
 
 ```go
 type ISubscriber interface {
-    OnMessage(request []byte, isSync bool, response func(data []byte) error)
+	OnMessage(request []byte, isSync bool, response func(data []byte) error)
 }
 ```
 
-- `isSync=true`：来自 `Request` 的同步消息，应按需调用 `response` 回复。
-- `isSync=false`：来自 `Publish` 的异步消息，业务可不调用 `response`，框架会自动 ACK。
+语义说明：
+
+- `isSync=true`：来自 `Request`，业务一般需要调用 `response(...)` 回复。
+- `isSync=false`：来自 `Publish`，框架会优先自动 ACK（按当前实现约束，业务不应修改 ACK 内容）。
+
+---
+
+## 构造函数
+
+```go
+func NewNATSMessageQueue(url string, queueOptions ...QueueOption) (IMessageQue, error)
+func NewNATSMessageQueueFromConn(conn *nats.Conn) (IMessageQue, error)
+func NewNATSMessageQueueFromConnWithOptions(conn *nats.Conn, queueOptions ...QueueOption) (IMessageQue, error)
+```
+
+---
+
+## 配置项（QueueOption）
+
+- `WithNatsOptions(...nats.Option)`：NATS 连接参数
+- `WithPublishAckTimeout(time.Duration)`：Publish ACK 等待超时
+- `WithLogger(Logger)`：注入自定义日志器
+- `WithDebugLogEnabled(bool)`：启用/关闭 debug 日志
+
+日志接口：
+
+```go
+type Logger interface {
+	Debugf(format string, args ...any)
+	Infof(format string, args ...any)
+	Warnf(format string, args ...any)
+	Errorf(format string, args ...any)
+}
+```
 
 ---
 
@@ -92,12 +113,10 @@ func main() {
 	}
 	defer sub.Unsubscribe()
 
-	// 异步发布（立即返回）
 	if err := q.Publish("demo.echo", []byte("async hello")); err != nil {
 		log.Fatal(err)
 	}
 
-	// 同步请求
 	reply, err := q.Request("demo.echo", []byte("sync hello"), 2*time.Second)
 	if err != nil {
 		log.Fatal(err)
@@ -108,41 +127,56 @@ func main() {
 
 ---
 
-## 配置项（QueueOption）
+## 可观测性
 
-- `WithNatsOptions(...nats.Option)`：NATS 连接参数
-- `WithPublishAckTimeout(time.Duration)`：后台 ACK 超时时间
-- `WithLogger(Logger)`：注入日志实现
-- `WithDebugLogEnabled(bool)`：是否启用 Debug 日志
+可通过以下函数获取连接与内部事件统计：
+
+```go
+GetConnectionEventStats(mq IMessageQue) (ConnectionEventStats, bool)
+```
+
+当前快照包含：
+
+- 断连次数/重连次数
+- Publish ACK 超时丢弃次数
+- Dispatcher panic 次数
+- 最近一次断连错误与断连/重连时间
 
 ---
 
-## 运行测试与压测
+## 测试与压测
+
+基础测试：
 
 ```bash
 go test ./...
-go test ./... -run TestConcurrentRequestStress -v
-go test ./... -bench BenchmarkRequestParallel -benchmem -run ^$
 ```
 
-可选环境变量：
+接口覆盖测试（包含 Publish/Request/Subscribe/Close）：
 
-- `NATS_URL`
-- `NATS_STRESS_TOTAL`
-- `NATS_STRESS_WORKERS`
-- `NATS_STRESS_TIMEOUT_MS`
-- `NATS_STRESS_DURATION_SEC`
-- `NATS_STRESS_MODE` (`process` / `local`)
-- `NATS_BENCH_TIMEOUT_MS`
+```bash
+go test ./... -run TestInterfacesIntegration -v
+```
+
+压测（需可连接 NATS）：
+
+```bash
+go test ./... -run TestRequestStress -v
+go test ./... -run TestPublishStress -v
+go test ./... -run TestMixedRequestPublishStress -v
+```
+
+Benchmark：
+
+```bash
+go test ./... -bench BenchmarkRequestParallel -benchmem -run ^$
+go test ./... -bench BenchmarkPublishParallel -benchmem -run ^$
+go test ./... -bench BenchmarkMixedParallel -benchmem -run ^$
+```
 
 ---
 
-## 可观测指标函数
+## 备注
 
-- `GetConnectionEventStats(mq IMessageQue) (ConnectionEventStats, bool)`
-
----
-
-## 注意事项
-
-- `Publish` 是“异步返回 + 后台 ACK 校验”，`nil` 仅表示“成功入 ACK 队列”。
+- 当前实现遵循 NATS 原生订阅语义：同一 subject 可重复订阅（会重复收到消息）。
+- `Publish` 返回 `nil` 表示消息已成功发送并进入 ACK 跟踪流程，不代表对端业务处理成功。
