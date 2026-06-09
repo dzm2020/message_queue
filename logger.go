@@ -11,7 +11,8 @@ type Logger interface {
 }
 
 func defaultLogger() Logger {
-	return &stdLogger{base: log.Default()}
+	//return &stdLogger{base: log.Default()}
+	return &noopLogger{}
 }
 
 type stdLogger struct {
@@ -33,3 +34,10 @@ func (l *stdLogger) Warnf(format string, args ...any) {
 func (l *stdLogger) Errorf(format string, args ...any) {
 	l.base.Printf("[ERROR] "+format, args...)
 }
+
+type noopLogger struct{}
+
+func (noopLogger) Debugf(string, ...any) {}
+func (noopLogger) Infof(string, ...any)  {}
+func (noopLogger) Warnf(string, ...any)  {}
+func (noopLogger) Errorf(string, ...any) {}

@@ -1,17 +1,16 @@
 package queue
 
 import (
-	"errors"
-	"sync"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/duke-git/lancet/v2/maputil"
 	"github.com/nats-io/nats.go"
 )
 
-var ErrNilSubscriber = errors.New("subscriber is nil")
-var ErrNilConnection = errors.New("nats connection is nil")
-var ErrSubjectAlreadySubscribed = errors.New("subject already subscribed")
-var ErrPublishAckQueueFull = errors.New("publish ack queue is full")
+const publishRequestHeader = "X-MQ-Publish"
 
 // NewNATSMessageQueue 创建并连接 NATS 消息队列实例。
 func NewNATSMessageQueue(url string, queueOptions ...QueueOption) (IMessageQue, error) {
@@ -35,176 +34,98 @@ func NewNATSMessageQueueFromConnWithOptions(conn *nats.Conn, queueOptions ...Que
 
 func newNATSMessageQueueFromConn(conn *nats.Conn, cfg queueConfig) *natsMessageQueue {
 	mq := &natsMessageQueue{
-		conn:          conn,
-		cfg:           cfg,
-		dispatchers:   make(map[string]*subjectDispatcher),
-		subscriptions: make(map[string]*nats.Subscription),
+		conn:    conn,
+		cfg:     cfg,
+		waiters: maputil.NewConcurrentMap[int64, *nats.Msg](32),
 	}
-	if conn != nil {
-		mq.ack = newAckWorkerPool(conn, cfg.ackWorkerCount, cfg.ackQueueSize, cfg.publishAckTimeout, &mq.connStats, cfg.logger)
-	}
+	mq.debugf("queue init start has_conn=%t ack_timeout=%s", conn != nil, cfg.publishAckTimeout)
+	mq.connStats.logger = cfg.logger
 	mq.installConnectionHandlers()
+	if err := mq.initWaiters(); err != nil && mq.cfg.logger != nil {
+		mq.cfg.logger.Errorf("queue init waiters failed err=%v", err)
+	}
+	mq.debugf("queue init done waiter_inbox=%s", mq.waiterInbox)
 	return mq
 }
 
 type natsMessageQueue struct {
 	conn *nats.Conn
-	ack  *ackWorkerPool
 
-	cfg           queueConfig
-	connStats     connectionEventStats
-	mu            sync.RWMutex
-	dispatchers   map[string]*subjectDispatcher
-	subscriptions map[string]*nats.Subscription
+	cfg         queueConfig
+	connStats   connectionEventStats
+	waiters     *maputil.ConcurrentMap[int64, *nats.Msg]
+	waiterSeq   atomic.Int64
+	waiterInbox string
 }
 
-type natsSubscription struct {
-	sub     *nats.Subscription
-	cleanup func()
-	once    sync.Once
+func (mq *natsMessageQueue) debugf(format string, args ...any) {
+	if mq != nil && mq.cfg.logger != nil {
+		mq.cfg.logger.Debugf(format, args...)
+	}
 }
 
 func (mq *natsMessageQueue) Publish(subject string, data []byte) error {
-	mq.mu.RLock()
-	ack := mq.ack
 	logger := mq.cfg.logger
-	mq.mu.RUnlock()
+	waiterID := mq.waiterSeq.Add(1)
+	mq.debugf("publish start subject=%s bytes=%d waiter_id=%d", subject, len(data), waiterID)
 
-	if ack == nil {
-		return ErrNilConnection
-	}
-	if err := ack.Enqueue(subject, data); err != nil {
-		if logger != nil {
-			logger.Errorf("queue publish enqueue ack failed subject=%s err=%v", subject, err)
-		}
+	msg := nats.NewMsg(subject)
+	msg.Data = data
+	msg.Header.Set(publishRequestHeader, "1")
+	msg.Reply = mq.waiterReplySubject(waiterID)
+	if err := mq.conn.PublishMsg(msg); err != nil {
+		logger.Errorf("queue publish enqueue ack failed subject=%s err=%v", subject, err)
 		return err
 	}
+	mq.addWaiter(waiterID, msg)
+	mq.debugf("publish sent subject=%s waiter_id=%d reply=%s", subject, waiterID, msg.Reply)
 	return nil
 }
 
 func (mq *natsMessageQueue) Request(subject string, data []byte, timeout time.Duration) ([]byte, error) {
-	mq.mu.RLock()
 	conn := mq.conn
 	logger := mq.cfg.logger
-	mq.mu.RUnlock()
-	if conn == nil {
-		return nil, ErrNilConnection
-	}
+	mq.debugf("request start subject=%s bytes=%d timeout=%s", subject, len(data), timeout)
 	msg, err := conn.Request(subject, data, timeout)
 	if err != nil {
-		if logger != nil && errors.Is(err, nats.ErrTimeout) {
-			logger.Warnf("queue request timeout subject=%s timeout=%s err=%v", subject, timeout, err)
-		}
+		logger.Errorf("queue request timeout subject=%s timeout=%s err=%v", subject, timeout, err)
 		return nil, err
 	}
+	mq.debugf("request done subject=%s reply_bytes=%d", subject, len(msg.Data))
 	return msg.Data, nil
 }
 
 func (mq *natsMessageQueue) Subscribe(subject string, subscriber ISubscriber) (ISubscription, error) {
-	if subscriber == nil {
-		return nil, ErrNilSubscriber
-	}
-
-	mq.mu.Lock()
-	conn := mq.conn
-	if conn == nil {
-		mq.mu.Unlock()
-		return nil, ErrNilConnection
-	}
-	if _, exists := mq.dispatchers[subject]; exists {
-		mq.mu.Unlock()
-		return nil, ErrSubjectAlreadySubscribed
-	}
-
-	dispatcher := newSubjectDispatcher(subject, subscriber, mq.cfg.subjectQueueSize, &mq.connStats, mq.cfg.logger)
-
-	mq.dispatchers[subject] = dispatcher
-	mq.mu.Unlock()
-
-	sub, err := conn.ChanSubscribe(subject, dispatcher.msgCh)
-	if err != nil {
-		mq.mu.Lock()
-		delete(mq.dispatchers, subject)
-		mq.mu.Unlock()
-		dispatcher.stopAndWait()
-		return nil, err
-	}
-
-	mq.mu.Lock()
-	if mq.conn == nil {
-		mq.mu.Unlock()
-		_ = sub.Unsubscribe()
-		dispatcher.stopAndWait()
-		return nil, ErrNilConnection
-	}
-	mq.subscriptions[subject] = sub
-	mq.mu.Unlock()
-
-	cleanup := func() {
-		mq.mu.Lock()
-		subscription, subExists := mq.subscriptions[subject]
-		if subExists && subscription == sub {
-			delete(mq.subscriptions, subject)
-		}
-		current, exists := mq.dispatchers[subject]
-		if exists && current == dispatcher {
-			delete(mq.dispatchers, subject)
-		}
-		mq.mu.Unlock()
-		dispatcher.stopAndWait()
-	}
-
-	return &natsSubscription{sub: sub, cleanup: cleanup}, nil
-}
-
-func (s *natsSubscription) Unsubscribe() error {
-	var unsubscribeErr error
-	s.once.Do(func() {
-		unsubscribeErr = s.sub.Unsubscribe()
-		if s.cleanup != nil {
-			s.cleanup()
-		}
+	mq.debugf("subscribe start subject=%s", subject)
+	return mq.conn.Subscribe(subject, func(msg *nats.Msg) {
+		mq.handlerMessage(subject, subscriber, msg)
 	})
-	return unsubscribeErr
 }
 
-// Close 关闭 NATS 连接。
-func (mq *natsMessageQueue) Close() {
-	mq.mu.Lock()
-	dispatchers := make([]*subjectDispatcher, 0, len(mq.dispatchers))
-	subscriptions := make([]*nats.Subscription, 0, len(mq.subscriptions))
-	for _, dispatcher := range mq.dispatchers {
-		dispatchers = append(dispatchers, dispatcher)
-	}
-	for _, sub := range mq.subscriptions {
-		subscriptions = append(subscriptions, sub)
-	}
-	mq.dispatchers = make(map[string]*subjectDispatcher)
-	mq.subscriptions = make(map[string]*nats.Subscription)
-	conn := mq.conn
-	ack := mq.ack
-	mq.conn = nil
-	mq.ack = nil
-	mq.mu.Unlock()
+func (mq *natsMessageQueue) handlerMessage(subject string, subscriber ISubscriber, msg *nats.Msg) {
+	defer func() {
+		if r := recover(); r != nil {
+			mq.connStats.onDispatcherPanic()
+		}
+	}()
 
-	for _, sub := range subscriptions {
-		_ = sub.Unsubscribe()
-	}
+	isPublishMessage := msg.Header.Get(publishRequestHeader) == "1"
+	isSync := !isPublishMessage
+	mq.debugf("message received subject=%s is_sync=%t bytes=%d has_reply=%t", subject, isSync, len(msg.Data), msg.Reply != "")
 
-	for _, dispatcher := range dispatchers {
-		dispatcher.stopAndWait()
+	response := func(data []byte) error {
+		if msg.Reply == "" {
+			return nil
+		}
+		return msg.Respond(data)
 	}
-
-	if ack != nil {
-		ack.Close()
-	}
-
-	if conn != nil {
-		conn.Close()
+	if isSync {
+		subscriber.OnMessage(msg.Data, isSync, response)
+	} else {
+		_ = response(nil)
 	}
 }
 
-// ConnectionEventStats 返回断连/重连统计快照。
 func (mq *natsMessageQueue) ConnectionEventStats() ConnectionEventStats {
 	return mq.connStats.snapshot()
 }
@@ -216,19 +137,77 @@ func (mq *natsMessageQueue) installConnectionHandlers() {
 
 	mq.conn.SetDisconnectErrHandler(func(conn *nats.Conn, err error) {
 		mq.connStats.onDisconnect(err)
-		if mq.cfg.logger != nil {
-			if err != nil {
-				mq.cfg.logger.Warnf("queue nats disconnected err=%v", err)
-			} else {
-				mq.cfg.logger.Warnf("queue nats disconnected")
-			}
-		}
+		mq.debugf("connection event disconnected err=%v", err)
 	})
 
 	mq.conn.SetReconnectHandler(func(conn *nats.Conn) {
 		mq.connStats.onReconnect()
-		if mq.cfg.logger != nil {
-			mq.cfg.logger.Infof("queue nats reconnected server=%s", conn.ConnectedUrl())
-		}
+		mq.debugf("connection event reconnected server=%s", conn.ConnectedUrl())
 	})
+}
+
+func (mq *natsMessageQueue) initWaiters() error {
+	if mq.conn == nil {
+		return nil
+	}
+	mq.waiterInbox = nats.NewInbox()
+	mq.debugf("waiter init inbox=%s", mq.waiterInbox)
+	_, err := mq.conn.Subscribe(mq.waiterInbox+".*", func(msg *nats.Msg) {
+		mq.onWaiterReply(msg.Subject)
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (mq *natsMessageQueue) waiterReplySubject(waiterID int64) string {
+	return mq.waiterInbox + "." + strconv.FormatInt(waiterID, 10)
+}
+
+func (mq *natsMessageQueue) onWaiterReply(subject string) {
+	if mq.waiterInbox == "" {
+		return
+	}
+	prefix := mq.waiterInbox + "."
+	if !strings.HasPrefix(subject, prefix) {
+		return
+	}
+	idStr := strings.TrimPrefix(subject, prefix)
+	waiterID, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		mq.debugf("waiter reply parse failed subject=%s err=%v", subject, err)
+		return
+	}
+	if mq.delWaiter(waiterID) {
+		mq.debugf("waiter ack received waiter_id=%d", waiterID)
+	} else {
+		mq.debugf("waiter ack ignored waiter_id=%d reason=missing", waiterID)
+	}
+}
+
+func (mq *natsMessageQueue) addWaiter(waiterID int64, msg *nats.Msg) {
+	mq.waiters.Set(waiterID, msg)
+	mq.debugf("waiter add waiter_id=%d subject=%s", waiterID, msg.Subject)
+	timeout := mq.cfg.publishAckTimeout
+	time.AfterFunc(timeout, func() {
+		if !mq.delWaiter(waiterID) {
+			return
+		}
+		mq.connStats.onPublishAckDropped()
+		mq.debugf("waiter timeout waiter_id=%d timeout=%s", waiterID, timeout)
+	})
+}
+
+func (mq *natsMessageQueue) delWaiter(waiterID int64) bool {
+	_, ok := mq.waiters.GetAndDelete(waiterID)
+	return ok
+}
+
+// Close 关闭 NATS 连接。
+func (mq *natsMessageQueue) Close() {
+	mq.debugf("queue close start")
+	mq.conn.Close()
+	mq.waiters = maputil.NewConcurrentMap[int64, *nats.Msg](32)
+	mq.debugf("queue close done")
 }

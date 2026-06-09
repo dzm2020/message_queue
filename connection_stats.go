@@ -8,14 +8,13 @@ import (
 
 // ConnectionEventStats 是连接事件统计快照。
 type ConnectionEventStats struct {
-	Disconnects        uint64
-	Reconnects         uint64
-	PublishAckFailures uint64
-	PublishAckDropped  uint64
-	DispatcherPanics   uint64
-	LastDisconnectErr  string
-	LastDisconnectAt   time.Time
-	LastReconnectAt    time.Time
+	Disconnects       uint64
+	Reconnects        uint64
+	PublishAckDropped uint64
+	DispatcherPanics  uint64
+	LastDisconnectErr string
+	LastDisconnectAt  time.Time
+	LastReconnectAt   time.Time
 }
 
 type connectionEventStats struct {
@@ -24,6 +23,7 @@ type connectionEventStats struct {
 	publishAckFails  atomic.Uint64
 	publishAckDrops  atomic.Uint64
 	dispatcherPanics atomic.Uint64
+	logger           Logger
 
 	mu                sync.RWMutex
 	lastDisconnectErr string
@@ -41,6 +41,13 @@ func (s *connectionEventStats) onDisconnect(err error) {
 	}
 	s.lastDisconnectAt = time.Now()
 	s.mu.Unlock()
+	if s.logger != nil {
+		if err != nil {
+			s.logger.Warnf("queue nats disconnected err=%v", err)
+		} else {
+			s.logger.Warnf("queue nats disconnected")
+		}
+	}
 }
 
 func (s *connectionEventStats) onReconnect() {
@@ -48,10 +55,9 @@ func (s *connectionEventStats) onReconnect() {
 	s.mu.Lock()
 	s.lastReconnectAt = time.Now()
 	s.mu.Unlock()
-}
-
-func (s *connectionEventStats) onPublishAckFailure() uint64 {
-	return s.publishAckFails.Add(1)
+	if s.logger != nil {
+		s.logger.Infof("queue nats reconnected")
+	}
 }
 
 func (s *connectionEventStats) onPublishAckDropped() uint64 {
@@ -66,14 +72,13 @@ func (s *connectionEventStats) snapshot() ConnectionEventStats {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return ConnectionEventStats{
-		Disconnects:        s.disconnects.Load(),
-		Reconnects:         s.reconnects.Load(),
-		PublishAckFailures: s.publishAckFails.Load(),
-		PublishAckDropped:  s.publishAckDrops.Load(),
-		DispatcherPanics:   s.dispatcherPanics.Load(),
-		LastDisconnectErr:  s.lastDisconnectErr,
-		LastDisconnectAt:   s.lastDisconnectAt,
-		LastReconnectAt:    s.lastReconnectAt,
+		Disconnects:       s.disconnects.Load(),
+		Reconnects:        s.reconnects.Load(),
+		PublishAckDropped: s.publishAckDrops.Load(),
+		DispatcherPanics:  s.dispatcherPanics.Load(),
+		LastDisconnectErr: s.lastDisconnectErr,
+		LastDisconnectAt:  s.lastDisconnectAt,
+		LastReconnectAt:   s.lastReconnectAt,
 	}
 }
 
