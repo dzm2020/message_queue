@@ -20,6 +20,7 @@ type queueConfig struct {
 	ackQueueSize      int
 	natsOptions       []nats.Option
 	logger            Logger
+	enableDebugLog    bool
 }
 
 func defaultQueueConfig() queueConfig {
@@ -29,6 +30,7 @@ func defaultQueueConfig() queueConfig {
 		ackWorkerCount:    defaultAckWorkerCount,
 		ackQueueSize:      defaultAckQueueSize,
 		logger:            defaultLogger(),
+		enableDebugLog:    false,
 	}
 }
 
@@ -80,6 +82,13 @@ func WithLogger(logger Logger) QueueOption {
 		if logger != nil {
 			cfg.logger = logger
 		}
+	}
+}
+
+// WithDebugLogEnabled 控制是否输出 Debug 级别日志。
+func WithDebugLogEnabled(enabled bool) QueueOption {
+	return func(cfg *queueConfig) {
+		cfg.enableDebugLog = enabled
 	}
 }
 
