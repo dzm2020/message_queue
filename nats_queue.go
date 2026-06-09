@@ -16,7 +16,6 @@ import (
 const publishRequestHeader = "X-MQ-Publish"
 
 var ErrNilSubscriber = errors.New("subscriber is nil")
-var ErrNilConnection = errors.New("nats connection is nil")
 var ErrQueueInitFailed = errors.New("queue init failed")
 
 // NewNATSMessageQueue 创建并连接 NATS 消息队列实例。
@@ -85,10 +84,6 @@ func (mq *natsMessageQueue) debugf(format string, args ...any) {
 }
 
 func (mq *natsMessageQueue) Publish(subject string, data []byte) error {
-	if mq.conn == nil {
-		return ErrNilConnection
-	}
-
 	logger := mq.cfg.logger
 	waiterID := mq.waiterSeq.Add(1)
 	mq.debugf("publish start subject=%s bytes=%d waiter_id=%d", subject, len(data), waiterID)
@@ -110,20 +105,13 @@ func (mq *natsMessageQueue) Publish(subject string, data []byte) error {
 }
 
 func (mq *natsMessageQueue) Request(subject string, data []byte, timeout time.Duration) ([]byte, error) {
-
 	conn := mq.conn
 	logger := mq.cfg.logger
-	if conn == nil {
-		return nil, ErrNilConnection
-	}
+
 	mq.debugf("request start subject=%s bytes=%d timeout=%s", subject, len(data), timeout)
 	msg, err := conn.Request(subject, data, timeout)
 	if err != nil {
-		if errors.Is(err, nats.ErrTimeout) {
-			logger.Warnf("queue request timeout subject=%s timeout=%s err=%v", subject, timeout, err)
-		} else {
-			logger.Errorf("queue request err subject=%s timeout=%s err=%v", subject, timeout, err)
-		}
+		logger.Errorf("queue request err subject=%s timeout=%s err=%v", subject, timeout, err)
 		return nil, err
 	}
 	mq.debugf("request done subject=%s reply_bytes=%d", subject, len(msg.Data))
@@ -131,12 +119,8 @@ func (mq *natsMessageQueue) Request(subject string, data []byte, timeout time.Du
 }
 
 func (mq *natsMessageQueue) Subscribe(subject string, subscriber ISubscriber) (ISubscription, error) {
-
 	if subscriber == nil {
 		return nil, ErrNilSubscriber
-	}
-	if mq.conn == nil {
-		return nil, ErrNilConnection
 	}
 	mq.debugf("subscribe start subject=%s", subject)
 	return mq.conn.Subscribe(subject, func(msg *nats.Msg) {
@@ -220,15 +204,11 @@ func (mq *natsMessageQueue) onWaiterReply(subject string) {
 		mq.debugf("waiter reply parse failed subject=%s err=%v", subject, err)
 		return
 	}
-	if mq.delWaiter(waiterID) {
-		mq.debugf("waiter ack received waiter_id=%d", waiterID)
-	} else {
-		mq.debugf("waiter ack ignored waiter_id=%d reason=missing", waiterID)
-	}
+	mq.delWaiter(waiterID)
+	mq.debugf("waiter ack received waiter_id=%d", waiterID)
 }
 
 func (mq *natsMessageQueue) addWaiter(waiterID int64) {
-
 	entry := &waiterEntry{}
 	mq.waiters.Set(waiterID, entry)
 	mq.debugf("waiter add waiter_id=%d", waiterID)
@@ -256,10 +236,14 @@ func (mq *natsMessageQueue) delWaiter(waiterID int64) bool {
 // Close 关闭 NATS 连接。
 func (mq *natsMessageQueue) Close() {
 	mq.debugf("queue close start")
-	mq.waiters.Range(func(waiterID int64, _ *waiterEntry) bool {
-		_, _ = mq.waiters.GetAndDelete(waiterID)
+	var waiters []int64
+	mq.waiters.Range(func(waiterID int64, entry *waiterEntry) bool {
+		waiters = append(waiters, waiterID)
 		return true
 	})
+	for _, waiterID := range waiters {
+		mq.delWaiter(waiterID)
+	}
 	if mq.conn != nil {
 		mq.conn.Close()
 	}

@@ -161,7 +161,10 @@ func TestConcurrentRequestStress(t *testing.T) {
 	if err != nil {
 		t.Skipf("skip stress test: cannot connect nats at %s: %v", url, err)
 	}
-	mq := NewNATSMessageQueueFromConnWithOptions(conn)
+	mq, err := NewNATSMessageQueueFromConnWithOptions(conn)
+	if err != nil {
+		t.Fatalf("create queue failed: %v", err)
+	}
 	defer func() {
 		if closer, ok := mq.(interface{ Close() }); ok {
 			closer.Close()
@@ -295,7 +298,10 @@ func TestStressResponderProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helper connect failed: %v", err)
 	}
-	mq := NewNATSMessageQueueFromConnWithOptions(conn)
+	mq, err := NewNATSMessageQueueFromConnWithOptions(conn)
+	if err != nil {
+		t.Fatalf("create queue failed: %v", err)
+	}
 	defer func() {
 		if closer, ok := mq.(interface{ Close() }); ok {
 			closer.Close()
@@ -322,7 +328,10 @@ func BenchmarkRequestParallel(b *testing.B) {
 	if err != nil {
 		b.Skipf("skip benchmark: cannot connect nats at %s: %v", url, err)
 	}
-	mq := NewNATSMessageQueueFromConnWithOptions(conn)
+	mq, err := NewNATSMessageQueueFromConnWithOptions(conn)
+	if err != nil {
+		b.Fatalf("create queue failed: %v", err)
+	}
 	defer func() {
 		if closer, ok := mq.(interface{ Close() }); ok {
 			closer.Close()

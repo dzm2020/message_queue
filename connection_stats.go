@@ -20,7 +20,6 @@ type ConnectionEventStats struct {
 type connectionEventStats struct {
 	disconnects      atomic.Uint64
 	reconnects       atomic.Uint64
-	publishAckFails  atomic.Uint64
 	publishAckDrops  atomic.Uint64
 	dispatcherPanics atomic.Uint64
 	logger           Logger

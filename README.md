@@ -79,10 +79,7 @@ func main() {
 	q, err := mq.NewNATSMessageQueue(
 		nats.DefaultURL,
 		mq.WithNatsOptions(nats.Timeout(2*time.Second)),
-		mq.WithAckWorkerCount(8),
-		mq.WithAckQueueSize(4096),
 		mq.WithPublishAckTimeout(2*time.Second),
-		mq.WithSubjectQueueSize(1024),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -114,10 +111,9 @@ func main() {
 ## 配置项（QueueOption）
 
 - `WithNatsOptions(...nats.Option)`：NATS 连接参数
-- `WithAckWorkerCount(int)`：ACK worker 数
-- `WithAckQueueSize(int)`：每个 ACK worker 队列容量
 - `WithPublishAckTimeout(time.Duration)`：后台 ACK 超时时间
-- `WithSubjectQueueSize(int)`：每个 subject 的订阅队列容量
+- `WithLogger(Logger)`：注入日志实现
+- `WithDebugLogEnabled(bool)`：是否启用 Debug 日志
 
 ---
 
@@ -150,5 +146,3 @@ go test ./... -bench BenchmarkRequestParallel -benchmem -run ^$
 ## 注意事项
 
 - `Publish` 是“异步返回 + 后台 ACK 校验”，`nil` 仅表示“成功入 ACK 队列”。
-- 当 ACK 队列满时，`Publish` 会返回 `ErrPublishAckQueueFull`。
-- 同一 `subject` 重复订阅会返回 `ErrSubjectAlreadySubscribed`。

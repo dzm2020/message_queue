@@ -7,17 +7,11 @@ import (
 )
 
 const (
-	defaultSubjectQueueSize  = 1024
 	defaultPublishAckTimeout = 2 * time.Second
-	defaultAckWorkerCount    = 8
-	defaultAckQueueSize      = 4096
 )
 
 type queueConfig struct {
-	subjectQueueSize  int
 	publishAckTimeout time.Duration
-	ackWorkerCount    int
-	ackQueueSize      int
 	natsOptions       []nats.Option
 	logger            Logger
 	enableDebugLog    bool
@@ -25,10 +19,7 @@ type queueConfig struct {
 
 func defaultQueueConfig() queueConfig {
 	return queueConfig{
-		subjectQueueSize:  defaultSubjectQueueSize,
 		publishAckTimeout: defaultPublishAckTimeout,
-		ackWorkerCount:    defaultAckWorkerCount,
-		ackQueueSize:      defaultAckQueueSize,
 		logger:            defaultLogger(),
 		enableDebugLog:    false,
 	}
@@ -36,34 +27,10 @@ func defaultQueueConfig() queueConfig {
 
 type QueueOption func(*queueConfig)
 
-func WithSubjectQueueSize(size int) QueueOption {
-	return func(cfg *queueConfig) {
-		if size > 0 {
-			cfg.subjectQueueSize = size
-		}
-	}
-}
-
 func WithPublishAckTimeout(timeout time.Duration) QueueOption {
 	return func(cfg *queueConfig) {
 		if timeout > 0 {
 			cfg.publishAckTimeout = timeout
-		}
-	}
-}
-
-func WithAckWorkerCount(count int) QueueOption {
-	return func(cfg *queueConfig) {
-		if count > 0 {
-			cfg.ackWorkerCount = count
-		}
-	}
-}
-
-func WithAckQueueSize(size int) QueueOption {
-	return func(cfg *queueConfig) {
-		if size > 0 {
-			cfg.ackQueueSize = size
 		}
 	}
 }
