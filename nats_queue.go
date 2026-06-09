@@ -1,8 +1,10 @@
 package queue
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -73,11 +75,14 @@ func (mq *natsMessageQueue) Publish(subject string, data []byte) error {
 	msg.Data = data
 	msg.Header.Set(publishRequestHeader, "1")
 	msg.Reply = mq.waiterReplySubject(waiterID)
+
+	mq.addWaiter(waiterID, msg)
 	if err := mq.conn.PublishMsg(msg); err != nil {
+		mq.delWaiter(waiterID)
 		logger.Errorf("queue publish enqueue ack failed subject=%s err=%v", subject, err)
 		return err
 	}
-	mq.addWaiter(waiterID, msg)
+
 	mq.debugf("publish sent subject=%s waiter_id=%d reply=%s", subject, waiterID, msg.Reply)
 	return nil
 }
@@ -88,7 +93,7 @@ func (mq *natsMessageQueue) Request(subject string, data []byte, timeout time.Du
 	mq.debugf("request start subject=%s bytes=%d timeout=%s", subject, len(data), timeout)
 	msg, err := conn.Request(subject, data, timeout)
 	if err != nil {
-		logger.Errorf("queue request timeout subject=%s timeout=%s err=%v", subject, timeout, err)
+		logger.Errorf("queue request err subject=%s timeout=%s err=%v", subject, timeout, err)
 		return nil, err
 	}
 	mq.debugf("request done subject=%s reply_bytes=%d", subject, len(msg.Data))
@@ -96,6 +101,9 @@ func (mq *natsMessageQueue) Request(subject string, data []byte, timeout time.Du
 }
 
 func (mq *natsMessageQueue) Subscribe(subject string, subscriber ISubscriber) (ISubscription, error) {
+	if subscriber == nil {
+		return nil, fmt.Errorf("subscriber is nil")
+	}
 	mq.debugf("subscribe start subject=%s", subject)
 	return mq.conn.Subscribe(subject, func(msg *nats.Msg) {
 		mq.handlerMessage(subject, subscriber, msg)
@@ -112,18 +120,21 @@ func (mq *natsMessageQueue) handlerMessage(subject string, subscriber ISubscribe
 	isPublishMessage := msg.Header.Get(publishRequestHeader) == "1"
 	isSync := !isPublishMessage
 	mq.debugf("message received subject=%s is_sync=%t bytes=%d has_reply=%t", subject, isSync, len(msg.Data), msg.Reply != "")
-
+	var once sync.Once
 	response := func(data []byte) error {
-		if msg.Reply == "" {
-			return nil
-		}
-		return msg.Respond(data)
+		var err error
+		once.Do(func() {
+			if msg.Reply == "" {
+				return
+			}
+			err = msg.Respond(data)
+		})
+		return err
 	}
-	if isSync {
-		subscriber.OnMessage(msg.Data, isSync, response)
-	} else {
+	if !isSync {
 		_ = response(nil)
 	}
+	subscriber.OnMessage(msg.Data, isSync, response)
 }
 
 func (mq *natsMessageQueue) ConnectionEventStats() ConnectionEventStats {
@@ -208,6 +219,5 @@ func (mq *natsMessageQueue) delWaiter(waiterID int64) bool {
 func (mq *natsMessageQueue) Close() {
 	mq.debugf("queue close start")
 	mq.conn.Close()
-	mq.waiters = maputil.NewConcurrentMap[int64, *nats.Msg](32)
 	mq.debugf("queue close done")
 }
